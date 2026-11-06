@@ -26,7 +26,9 @@ Copy `.env.example` to `.env` only if you need a template; keep your existing `.
 
 The installed Expo Go version must support this project's Expo SDK. If Expo Go reports an SDK mismatch, install the matching Expo Go version or update the project SDK.
 
-The map uses `react-native-maps` and requests foreground location permission to center on your device. Expo Go includes the map native module. `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` is read by `app.config.js` for native builds; restrict that key to the Maps SDKs and your app identifiers in Google Cloud. Expo Go uses its own native map configuration.
+The map uses `react-native-maps` and requests foreground location permission to center on your device. Its controls show a 250 m visual safe-zone radius, Open-Meteo weather and air-quality readings, and SOS calling for the primary emergency contact (or 112). Recording a trigger saves the GPS fix, AQI, PM2.5/PM10, temperature, humidity, and weather details to `inhaler_triggers`. Expo Go includes the map native module. `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` is read by `app.config.js` for native builds; restrict that key to the Maps SDKs and your app identifiers in Google Cloud. Expo Go uses its own native map configuration.
+
+The Bluetooth control is visible but explains that live device pairing needs a native development build; Expo Go does not include a Bluetooth Low Energy module.
 
 ## Checks
 

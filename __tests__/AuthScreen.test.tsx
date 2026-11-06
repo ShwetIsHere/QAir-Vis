@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactTestRenderer, { type ReactTestInstance } from 'react-test-renderer';
 import { Text, TextInput } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import AuthScreen from '../src/components/AuthScreen';
 
@@ -15,7 +16,16 @@ const client = { auth } as unknown as SupabaseClient;
 function renderAuth() {
   const holder: { current?: ReactTestRenderer.ReactTestRenderer } = {};
   ReactTestRenderer.act(() => {
-    holder.current = ReactTestRenderer.create(<AuthScreen client={client} />);
+    holder.current = ReactTestRenderer.create(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 400, height: 800 },
+          insets: { top: 24, left: 0, right: 0, bottom: 24 },
+        }}
+      >
+        <AuthScreen client={client} />
+      </SafeAreaProvider>,
+    );
   });
   if (!holder.current) {
     throw new Error('Auth screen did not render.');

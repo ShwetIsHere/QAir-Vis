@@ -4,6 +4,7 @@
 
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import App from '../App';
 
 jest.mock('react-native-maps', () => {
@@ -19,6 +20,15 @@ jest.mock('react-native-maps', () => {
 
 test('renders correctly', async () => {
   await ReactTestRenderer.act(() => {
-    ReactTestRenderer.create(<App />);
+    ReactTestRenderer.create(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 400, height: 800 },
+          insets: { top: 24, left: 0, right: 0, bottom: 24 },
+        }}
+      >
+        <App />
+      </SafeAreaProvider>,
+    );
   });
 });

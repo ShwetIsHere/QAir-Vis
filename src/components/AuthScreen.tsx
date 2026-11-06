@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type AuthMode = 'sign-in' | 'sign-up' | 'reset-password';
 
@@ -22,6 +23,7 @@ type AuthScreenProps = {
 };
 
 export default function AuthScreen({ client }: AuthScreenProps) {
+  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<AuthMode>('sign-in');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -134,7 +136,13 @@ export default function AuthScreen({ client }: AuthScreenProps) {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            {
+              paddingTop: Math.max(28, insets.top + 12),
+              paddingBottom: Math.max(32, insets.bottom + 16),
+            },
+          ]}
           keyboardShouldPersistTaps="handled"
         >
           <View style={styles.header}>
