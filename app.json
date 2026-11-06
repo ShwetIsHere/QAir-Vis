@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "QAir-Vis",
+    "slug": "qair-vis",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.qairvis.app"
+    },
+    "android": {
+      "package": "com.qairvis.app"
+    }
+  }
+}

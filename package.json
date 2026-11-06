@@ -1,0 +1,36 @@
+{
+  "name": "QAirVis",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "lint": "eslint .",
+    "start": "expo start",
+    "test": "jest"
+  },
+  "dependencies": {
+    "expo": "~58.0.23",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "^5.5.2"
+  },
+  "devDependencies": {
+    "@react-native/eslint-config": "0.88.1",
+    "@react-native/typescript-config": "0.88.1",
+    "@types/jest": "30.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-test-renderer": "^19.1.0",
+    "babel-preset-expo": "~58.0.0",
+    "eslint": "^8.19.0",
+    "jest": "~30.5.2",
+    "jest-expo": "~58.0.14",
+    "prettier": "2.8.8",
+    "react-test-renderer": "19.3.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">= 22.11.0"
+  }
+}

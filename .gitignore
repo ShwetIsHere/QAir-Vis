@@ -145,5 +145,38 @@ vite.config.ts.timestamp-*
 # Astro generated types
 .astro/
 
+# React Native / Xcode
+*.DS_Store
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserstate
+xcuserdata
+DerivedData
+*.ipa
+*.hmap
+**/.xcode.env.local
+
+# Android / IntelliJ
+.idea
+.gradle
+local.properties
+*.iml
+*.hprof
+.cxx/
+*.keystore
+!debug.keystore
+.kotlin/
+
+# React Native generated files
+*.jsbundle
+**/Pods/
+/vendor/bundle/
+.metro-health-check*
+
 # Turbo Repo
 .turbo
+
+# Expo
+.expo/
