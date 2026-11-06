@@ -14,7 +14,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
-import * as SecureStore from 'expo-secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, {
   Circle,
@@ -59,6 +58,13 @@ export type TriggerRecord = {
   pm10: number | null;
   temperature: number | null;
   humidity: number | null;
+  wind_speed_180m?: number | null;
+  showers?: number | null;
+  precipitation_next_hour?: number | null;
+  showers_next_hour?: number | null;
+  dew_point_2m?: number | null;
+  surface_pressure?: number | null;
+  pressure_msl?: number | null;
   notes: string | null;
   timestamp: string;
 };
@@ -87,9 +93,87 @@ function distanceMeters(
   );
 }
 
+function isTriggerRecord(value: unknown): value is TriggerRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.user_id === 'string' &&
+    typeof record.latitude === 'number' &&
+    Number.isFinite(record.latitude) &&
+    typeof record.longitude === 'number' &&
+    Number.isFinite(record.longitude) &&
+    typeof record.timestamp === 'string'
+  );
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (!error || typeof error !== 'object') {
+    return 'Unexpected database error.';
+  }
+
+  const details = error as {
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    hint?: unknown;
+  };
+  const message =
+    typeof details.message === 'string'
+      ? details.message
+      : 'Unexpected database error.';
+  const code = typeof details.code === 'string' ? ` [${details.code}]` : '';
+  const extra =
+    typeof details.details === 'string' && details.details
+      ? ` ${details.details}`
+      : typeof details.hint === 'string' && details.hint
+      ? ` ${details.hint}`
+      : '';
+  return `${message}${code}${extra}`;
+}
+
+function getTriggerLoadHint(error: unknown) {
+  if (!error || typeof error !== 'object') return '';
+  const details = error as { code?: unknown; message?: unknown };
+  const message =
+    typeof details.message === 'string' ? details.message.toLowerCase() : '';
+
+  if (
+    details.code === '42501' ||
+    message.includes('permission denied') ||
+    message.includes('row-level security')
+  ) {
+    return ' Run supabase-rls.sql in the Supabase SQL Editor while signed in as the project owner.';
+  }
+  if (
+    details.code === '42P01' ||
+    details.code === 'PGRST205' ||
+    message.includes('does not exist')
+  ) {
+    return ' Create public.inhaler_triggers using supabase.sql, then run supabase-rls.sql.';
+  }
+  return '';
+}
+
+function isMissingTriggerWeatherColumn(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const details = error as { code?: unknown; message?: unknown };
+  const message =
+    typeof details.message === 'string' ? details.message.toLowerCase() : '';
+  return (
+    details.code === '42703' ||
+    details.code === 'PGRST204' ||
+    (message.includes('column') &&
+      (message.includes('does not exist') || message.includes('schema cache')))
+  );
+}
+
 export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
+  const [mapReady, setMapReady] = useState(false);
+  const hasAutoFittedTriggers = useRef(false);
   const [region, setRegion] = useState(defaultRegion);
   const [deviceCoordinate, setDeviceCoordinate] = useState<LatLng | null>(null);
   const [hasLocationPermission, setHasLocationPermission] = useState(false);
@@ -114,9 +198,10 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
     null,
   );
   const [nearbyTriggerCount, setNearbyTriggerCount] = useState(0);
+  const [nearbyYellowCount, setNearbyYellowCount] = useState(0);
   const [redZoneError, setRedZoneError] = useState('');
-  const redZoneActive = useRef(false);
-  const redZoneStateInitialized = useRef(false);
+  const redZoneAlerted = useRef(false);
+  const redZoneNotificationPending = useRef(false);
   const notificationPermissionRequested = useRef(false);
 
   const loadTriggers = useCallback(async () => {
@@ -125,20 +210,35 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
     try {
       const pageSize = 500;
       const allTriggers: TriggerRecord[] = [];
+      let includeWeatherColumns = true;
       for (let from = 0; ; from += pageSize) {
-        const { data, error } = await client
-          .from('inhaler_triggers')
-          .select(
-            'id, user_id, latitude, longitude, aqi, category, pm25, pm10, temperature, humidity, notes, timestamp',
-          )
-          .eq('user_id', user.id)
-          .order('timestamp', { ascending: false })
-          .range(from, from + pageSize - 1);
+        const fetchPage = (includeExtendedColumns: boolean) =>
+          client
+            .from('inhaler_triggers')
+            .select(
+              includeExtendedColumns
+                ? 'id, user_id, latitude, longitude, aqi, category, pm25, pm10, temperature, humidity, wind_speed_180m, showers, precipitation_next_hour, showers_next_hour, dew_point_2m, surface_pressure, pressure_msl, notes, timestamp'
+                : 'id, user_id, latitude, longitude, aqi, category, pm25, pm10, temperature, humidity, notes, timestamp',
+            )
+            .eq('user_id', user.id)
+            .order('timestamp', { ascending: false })
+            .range(from, from + pageSize - 1);
+
+        let { data, error } = await fetchPage(includeWeatherColumns);
+        if (
+          error &&
+          includeWeatherColumns &&
+          isMissingTriggerWeatherColumn(error)
+        ) {
+          includeWeatherColumns = false;
+          ({ data, error } = await fetchPage(false));
+        }
         if (error) {
           throw error;
         }
 
-        const page = (data ?? []) as TriggerRecord[];
+        const rows: unknown = data;
+        const page = Array.isArray(rows) ? rows.filter(isTriggerRecord) : [];
         allTriggers.push(...page);
         if (page.length < pageSize) {
           break;
@@ -147,9 +247,9 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
       setTriggers(allTriggers);
     } catch (error) {
       setTriggersError(
-        error instanceof Error
-          ? error.message
-          : 'Could not load your recorded triggers.',
+        `Could not load your recorded triggers: ${getErrorMessage(
+          error,
+        )}${getTriggerLoadHint(error)}`,
       );
     } finally {
       setTriggersLoading(false);
@@ -250,38 +350,26 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
     const nearbyCount = triggers.filter(
       trigger => distanceMeters(deviceCoordinate, trigger) <= 200,
     ).length;
+    const yellowCount = triggers.filter(
+      trigger => distanceMeters(deviceCoordinate, trigger) <= 100,
+    ).length;
     setNearbyTriggerCount(nearbyCount);
-    const insideRedZone = nearbyCount > 5;
-    const notificationKey = `qair-red-zone:${user.id}`;
+    setNearbyYellowCount(yellowCount);
+    const insideRedZone = nearbyCount >= 5;
 
     if (!insideRedZone) {
-      const shouldClearNotificationState =
-        redZoneActive.current || !redZoneStateInitialized.current;
-      redZoneActive.current = false;
-      redZoneStateInitialized.current = true;
+      redZoneAlerted.current = false;
       notificationPermissionRequested.current = false;
       setRedZoneError('');
-      if (shouldClearNotificationState) {
-        try {
-          await SecureStore.deleteItemAsync(notificationKey);
-        } catch (error) {
-          setRedZoneError(
-            error instanceof Error
-              ? `Could not update red-zone alert state: ${error.message}`
-              : 'Could not update red-zone alert state.',
-          );
-        }
-      }
       return;
     }
 
-    redZoneActive.current = true;
-    redZoneStateInitialized.current = true;
-    try {
-      if (await SecureStore.getItemAsync(notificationKey)) {
-        return;
-      }
+    if (redZoneAlerted.current || redZoneNotificationPending.current) {
+      return;
+    }
 
+    redZoneNotificationPending.current = true;
+    try {
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('health-alerts', {
           name: 'Health alerts',
@@ -307,15 +395,18 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
       }
 
       notificationPermissionRequested.current = false;
-      await Notifications.scheduleNotificationAsync({
+      const notificationId = await Notifications.scheduleNotificationAsync({
         content: {
           title: 'Red zone alert',
-          body: `${nearbyCount} recorded triggers are within 200 m. You are in a red zone.`,
+          body: `${nearbyCount} triggers are within 200 m. You are in a red zone.`,
           sound: true,
         },
         trigger: null,
       });
-      await SecureStore.setItemAsync(notificationKey, 'true');
+      if (!notificationId) {
+        throw new Error('The notification was not scheduled.');
+      }
+      redZoneAlerted.current = true;
       setRedZoneError('');
     } catch (error) {
       setRedZoneError(
@@ -323,8 +414,10 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
           ? `Red zone detected, but notification failed: ${error.message}`
           : 'Red zone detected, but notification failed.',
       );
+    } finally {
+      redZoneNotificationPending.current = false;
     }
-  }, [deviceCoordinate, triggers, user.id]);
+  }, [deviceCoordinate, triggers]);
 
   useEffect(() => {
     loadCount();
@@ -333,6 +426,30 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
   useEffect(() => {
     loadTriggers();
   }, [loadTriggers]);
+
+  useEffect(() => {
+    if (
+      !mapReady ||
+      triggersLoading ||
+      triggersError ||
+      triggers.length === 0 ||
+      hasAutoFittedTriggers.current
+    ) {
+      return;
+    }
+
+    mapRef.current?.fitToCoordinates(
+      triggers.map(trigger => ({
+        latitude: trigger.latitude,
+        longitude: trigger.longitude,
+      })),
+      {
+        edgePadding: { top: 180, right: 60, bottom: 180, left: 60 },
+        animated: true,
+      },
+    );
+    hasAutoFittedTriggers.current = true;
+  }, [mapReady, triggers, triggersError, triggersLoading]);
 
   useEffect(() => {
     evaluateRedZone();
@@ -355,7 +472,7 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
 
         setHasLocationPermission(true);
         const position = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
+          accuracy: Location.Accuracy.Highest,
         });
         if (!active) {
           return;
@@ -375,9 +492,9 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
         mapRef.current?.animateToRegion(nextRegion, 700);
         locationSubscription = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.Balanced,
-            distanceInterval: 50,
-            timeInterval: 30_000,
+            accuracy: Location.Accuracy.Highest,
+            distanceInterval: 10,
+            timeInterval: 10_000,
           },
           nextPosition => {
             if (active) {
@@ -421,7 +538,7 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
       setHasLocationPermission(true);
       setLocationMessage('');
       const position = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
+        accuracy: Location.Accuracy.Highest,
       });
       const nextRegion: Region = {
         latitude: position.coords.latitude,
@@ -433,6 +550,13 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
       });
+      setLocationMessage(
+        position.coords.accuracy !== null && position.coords.accuracy > 20
+          ? `Current location accuracy is ±${Math.round(
+              position.coords.accuracy,
+            )} m; move outdoors for a stronger GPS fix.`
+          : '',
+      );
       setRegion(nextRegion);
       mapRef.current?.animateToRegion(nextRegion, 700);
     } catch {
@@ -575,47 +699,111 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
       );
 
       const currentEnvironment = await loadEnvironment(coordinate);
-      if (!currentEnvironment) {
-        throw new Error(
-          'Weather or air-quality data is unavailable. Check your connection and retry.',
-        );
-      }
-
-      const weatherNotes = [
-        `Feels like ${currentEnvironment.apparentTemperature}°C`,
-        `Precipitation ${currentEnvironment.precipitation} mm`,
-        `Weather code ${currentEnvironment.weatherCode}`,
-        `Cloud cover ${currentEnvironment.cloudCover}%`,
-        `Pressure ${currentEnvironment.pressure} hPa`,
-        `Visibility ${currentEnvironment.visibility} m`,
-        `Wind ${currentEnvironment.windSpeed} km/h`,
-        currentEnvironment.uvIndex === null
-          ? null
-          : `Daily max UV ${currentEnvironment.uvIndex}`,
-      ]
-        .filter(Boolean)
-        .join('; ');
-
-      const { error } = await client.from('inhaler_triggers').insert({
+      const triggerData = {
         user_id: user.id,
         latitude: coordinate.latitude,
         longitude: coordinate.longitude,
-        aqi: Math.round(currentEnvironment.aqi),
-        category: getAqiCategory(currentEnvironment.aqi),
-        pm25: currentEnvironment.pm25,
-        pm10: currentEnvironment.pm10,
-        temperature: currentEnvironment.temperature,
-        humidity: currentEnvironment.humidity,
-        notes: `Recorded from the map. ${weatherNotes}`,
-      });
+        aqi: currentEnvironment ? Math.round(currentEnvironment.aqi) : null,
+        category: currentEnvironment
+          ? getAqiCategory(currentEnvironment.aqi)
+          : null,
+        pm25: currentEnvironment?.pm25 ?? null,
+        pm10: currentEnvironment?.pm10 ?? null,
+        temperature: currentEnvironment?.temperature ?? null,
+        humidity: currentEnvironment?.humidity ?? null,
+        wind_speed_180m: currentEnvironment?.windSpeed180m ?? null,
+        showers: currentEnvironment?.showers ?? null,
+        precipitation_next_hour:
+          currentEnvironment?.precipitationNextHour ?? null,
+        showers_next_hour: currentEnvironment?.showersNextHour ?? null,
+        dew_point_2m: currentEnvironment?.dewPoint ?? null,
+        surface_pressure: currentEnvironment?.surfacePressure ?? null,
+        pressure_msl: currentEnvironment?.pressure ?? null,
+        notes: currentEnvironment
+          ? [
+              'Recorded from the map.',
+              `Feels like ${currentEnvironment.apparentTemperature}°C`,
+              `Precipitation ${currentEnvironment.precipitation} mm`,
+              `Weather code ${currentEnvironment.weatherCode}`,
+              `Cloud cover ${currentEnvironment.cloudCover}%`,
+              `Pressure ${currentEnvironment.pressure} hPa`,
+              `Visibility ${currentEnvironment.visibility} m`,
+              `Wind ${currentEnvironment.windSpeed} km/h`,
+              `Wind at 180 m ${currentEnvironment.windSpeed180m} km/h`,
+              `Showers ${currentEnvironment.showers} mm`,
+              `Precipitation next hour ${
+                currentEnvironment.precipitationNextHour ?? 'unavailable'
+              } mm`,
+              `Showers next hour ${
+                currentEnvironment.showersNextHour ?? 'unavailable'
+              } mm`,
+              `Dew point ${currentEnvironment.dewPoint}°C`,
+              `Surface pressure ${currentEnvironment.surfacePressure} hPa`,
+              `Pressure (MSL) ${currentEnvironment.pressure} hPa`,
+              currentEnvironment.uvIndex === null
+                ? null
+                : `Daily max UV ${currentEnvironment.uvIndex}`,
+            ]
+              .filter(Boolean)
+              .join('; ')
+          : 'Recorded from the map. Weather and air-quality readings were unavailable.',
+      };
+
+      let error: {
+        code?: string;
+        message?: string;
+        details?: string;
+        hint?: string;
+      } | null = null;
+      if (currentEnvironment) {
+        const result = await client
+          .from('inhaler_triggers')
+          .insert(triggerData);
+        error = result.error;
+        if (error && isMissingTriggerWeatherColumn(error)) {
+          const fallbackResult = await client.from('inhaler_triggers').insert({
+            user_id: triggerData.user_id,
+            latitude: triggerData.latitude,
+            longitude: triggerData.longitude,
+            aqi: triggerData.aqi,
+            category: triggerData.category,
+            pm25: triggerData.pm25,
+            pm10: triggerData.pm10,
+            temperature: triggerData.temperature,
+            humidity: triggerData.humidity,
+            notes: triggerData.notes,
+          });
+          error = fallbackResult.error;
+        }
+      } else {
+        const result = await client.from('inhaler_triggers').insert({
+          user_id: triggerData.user_id,
+          latitude: triggerData.latitude,
+          longitude: triggerData.longitude,
+          aqi: triggerData.aqi,
+          category: triggerData.category,
+          pm25: triggerData.pm25,
+          pm10: triggerData.pm10,
+          temperature: triggerData.temperature,
+          humidity: triggerData.humidity,
+          notes: triggerData.notes,
+        });
+        error = result.error;
+      }
       if (error) {
-        throw error;
+        throw new Error(
+          `Could not save this trigger: ${getErrorMessage(
+            error,
+          )}${getTriggerLoadHint(error)}`,
+        );
       }
       await loadTriggers();
       setTriggerMessage(
-        `Trigger recorded · AQI ${Math.round(currentEnvironment.aqi)} · ${
-          currentEnvironment.temperature
-        }°C`,
+        currentEnvironment
+          ? `Trigger recorded · AQI ${Math.round(currentEnvironment.aqi)} · ${
+              currentEnvironment.temperature
+            }°C`
+          : 'Trigger recorded. Weather readings were unavailable.',
       );
     } catch (error) {
       setTriggerMessage(
@@ -650,6 +838,7 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
         showsMyLocationButton={false}
         toolbarEnabled={false}
         onRegionChangeComplete={setRegion}
+        onMapReady={() => setMapReady(true)}
       >
         {safeZoneEnabled && deviceCoordinate && (
           <Circle
@@ -660,26 +849,27 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
             strokeWidth={2}
           />
         )}
-        {nearbyTriggerCount > 5 && deviceCoordinate && (
+        {deviceCoordinate && nearbyTriggerCount >= 5 && (
           <Circle
             center={deviceCoordinate}
             radius={200}
-            strokeColor="rgba(239, 68, 68, 0.95)"
-            fillColor="rgba(239, 68, 68, 0.25)"
-            strokeWidth={3}
+            strokeColor="rgba(239, 68, 68, 0)"
+            fillColor="rgba(239, 68, 68, 0.22)"
+            strokeWidth={0}
           />
         )}
-        {deviceCoordinate && (
-          <Marker coordinate={deviceCoordinate}>
-            <View style={styles.userMarker}>
-              <MaterialCommunityIcons
-                name="heart-pulse"
-                color="#fff"
-                size={20}
-              />
-            </View>
-          </Marker>
-        )}
+        {deviceCoordinate &&
+          nearbyTriggerCount < 5 &&
+          nearbyYellowCount >= 3 &&
+          nearbyYellowCount <= 4 && (
+            <Circle
+              center={deviceCoordinate}
+              radius={100}
+              strokeColor="rgba(245, 190, 45, 0)"
+              fillColor="rgba(245, 190, 45, 0.2)"
+              strokeWidth={0}
+            />
+          )}
         {triggers.map(trigger => (
           <Marker
             key={trigger.id}
@@ -697,7 +887,7 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
                 (trigger.aqi ?? 0) > 100 && styles.triggerMarkerWarning,
               ]}
             >
-              <MaterialCommunityIcons name="lungs" color="#fff" size={17} />
+              <MaterialCommunityIcons name="lungs" color="#fff" size={25} />
             </View>
           </Marker>
         ))}
@@ -754,7 +944,9 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
             { top: insets.top + 112 },
           ]}
         >
-          <Text style={styles.redZoneText}>Couldn’t load map marks.</Text>
+          <Text style={styles.redZoneText}>
+            Couldn’t load map marks: {triggersError}
+          </Text>
           <Pressable onPress={loadTriggers}>
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
@@ -764,25 +956,21 @@ export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
           <ActivityIndicator color="#fff" size="small" />
           <Text style={styles.redZoneText}>Loading map marks</Text>
         </View>
-      ) : nearbyTriggerCount > 5 ? (
+      ) : nearbyTriggerCount >= 5 ? (
         <View style={[styles.redZoneBanner, { top: insets.top + 112 }]}>
           <MaterialCommunityIcons name="alert" color="#fff" size={18} />
           <Text style={styles.redZoneText}>
             RED ZONE · {nearbyTriggerCount} triggers within 200 m
           </Text>
         </View>
-      ) : (
-        <View style={[styles.triggerCountBadge, { top: insets.top + 112 }]}>
-          <MaterialCommunityIcons
-            name="map-marker-multiple"
-            color="#fff"
-            size={16}
-          />
+      ) : nearbyYellowCount >= 3 && nearbyYellowCount <= 4 ? (
+        <View style={[styles.yellowZoneBanner, { top: insets.top + 112 }]}>
+          <MaterialCommunityIcons name="alert" color="#fff" size={18} />
           <Text style={styles.redZoneText}>
-            {triggers.length} recorded trigger{triggers.length === 1 ? '' : 's'}
+            YELLOW ZONE · {nearbyYellowCount} triggers within 100 m
           </Text>
         </View>
-      )}
+      ) : null}
       {!!redZoneError && (
         <View
           style={[
@@ -1188,9 +1376,9 @@ const styles = StyleSheet.create({
   },
   environmentHighlight: { color: '#5ce0bd' },
   triggerMarker: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#278c78',
@@ -1226,17 +1414,21 @@ const styles = StyleSheet.create({
     borderColor: '#ffd0d5',
     elevation: 6,
   },
-  redZoneText: { color: '#fff', fontSize: 12, fontWeight: '700' },
-  userMarker: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  yellowZoneBanner: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#e75171',
-    borderWidth: 2,
-    borderColor: '#fff',
+    gap: 7,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: '#a66c08',
+    borderWidth: 1,
+    borderColor: '#ffe69a',
+    elevation: 6,
   },
+  redZoneText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   recordButton: {
     position: 'absolute',
     alignSelf: 'center',

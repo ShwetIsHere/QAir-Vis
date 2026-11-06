@@ -1,0 +1,4 @@
+project_id = "qair-vis"
+
+[functions.weather-suggestion]
+verify_jwt = true

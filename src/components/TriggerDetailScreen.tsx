@@ -23,6 +23,27 @@ type Props = {
   onBack: () => void;
 };
 
+type FunctionErrorResponse = {
+  status: number;
+  clone: () => { json: () => Promise<unknown> };
+};
+
+function isFunctionErrorResponse(
+  value: unknown,
+): value is FunctionErrorResponse {
+  if (!value || typeof value !== 'object') return false;
+  return (
+    'status' in value &&
+    typeof value.status === 'number' &&
+    'clone' in value &&
+    typeof value.clone === 'function'
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function formatLocation(place: Location.LocationGeocodedAddress | undefined) {
   if (!place) return 'Recorded location';
   return [place.city || place.subregion, place.region, place.country]
@@ -112,11 +133,39 @@ export default function TriggerDetailScreen({
       }
       setSuggestion(data.suggestion.trim());
     } catch (error) {
-      setSuggestionError(
+      let message =
         error instanceof Error
           ? error.message
-          : 'Could not load a suggestion. Try again later.',
-      );
+          : 'Could not load a suggestion. Try again later.';
+      const context =
+        error && typeof error === 'object' && 'context' in error
+          ? error.context
+          : undefined;
+      if (isFunctionErrorResponse(context)) {
+        try {
+          const responseBody = await context.clone().json();
+          if (
+            isRecord(responseBody) &&
+            typeof responseBody.error === 'string'
+          ) {
+            message = responseBody.error;
+          } else if (
+            isRecord(responseBody) &&
+            typeof responseBody.message === 'string'
+          ) {
+            message = responseBody.message;
+          }
+          if (
+            isRecord(responseBody) &&
+            typeof responseBody.details === 'string'
+          ) {
+            message = `${message} (${responseBody.details})`;
+          }
+        } catch {
+          message = `${message} (HTTP ${context.status})`;
+        }
+      }
+      setSuggestionError(message);
     } finally {
       setSuggestionLoading(false);
     }
@@ -125,6 +174,16 @@ export default function TriggerDetailScreen({
   const aqi = environment?.aqi ?? trigger.aqi;
   const aqiCategory =
     aqi === null ? trigger.category || 'Unavailable' : getAqiCategory(aqi);
+  const wind180m = trigger.wind_speed_180m ?? environment?.windSpeed180m;
+  const showers = trigger.showers ?? environment?.showers;
+  const precipitationNextHour =
+    trigger.precipitation_next_hour ?? environment?.precipitationNextHour;
+  const showersNextHour =
+    trigger.showers_next_hour ?? environment?.showersNextHour;
+  const dewPoint = trigger.dew_point_2m ?? environment?.dewPoint;
+  const surfacePressure =
+    trigger.surface_pressure ?? environment?.surfacePressure;
+  const pressureMsl = trigger.pressure_msl ?? environment?.pressure;
 
   return (
     <View style={styles.screen}>
@@ -210,55 +269,96 @@ export default function TriggerDetailScreen({
           )}
           {loadError ? (
             <Text style={styles.weatherError}>{loadError}</Text>
-          ) : (
-            <View style={styles.metricGrid}>
-              <Metric
-                icon="water-percent"
-                label="Humidity"
-                value={
-                  environment
-                    ? `${Math.round(environment.humidity)}%`
-                    : trigger.humidity === null
-                    ? '—'
-                    : `${Math.round(trigger.humidity)}%`
-                }
+          ) : null}
+          <View style={styles.metricGrid}>
+            <Metric
+              icon="water-percent"
+              label="Humidity"
+              value={
+                environment
+                  ? `${Math.round(environment.humidity)}%`
+                  : trigger.humidity === null
+                  ? '—'
+                  : `${Math.round(trigger.humidity)}%`
+              }
+            />
+            <Metric
+              icon="weather-windy"
+              label="Wind (180 m)"
+              value={wind180m === undefined ? '—' : `${wind180m} km/h`}
+            />
+            <Metric
+              icon="weather-rainy"
+              label="Showers"
+              value={showers === undefined ? '—' : `${showers} mm`}
+            />
+            <Metric
+              icon="weather-cloudy"
+              label="Cloud cover"
+              value={environment ? `${environment.cloudCover}%` : '—'}
+            />
+            <Metric
+              icon="white-balance-sunny"
+              label="UV index"
+              value={
+                environment?.uvIndex === null || !environment
+                  ? '—'
+                  : `${environment.uvIndex}`
+              }
+            />
+            <Metric
+              icon="eye-outline"
+              label="Visibility"
+              value={
+                environment
+                  ? `${(environment.visibility / 1000).toFixed(1)} km`
+                  : '—'
+              }
+            />
+          </View>
+        </LinearGradient>
+
+        <View style={styles.airCard}>
+          <Text style={styles.sectionTitle}>Additional Information</Text>
+          <View style={styles.additionalMetrics}>
+            <AdditionalInfo
+              label="Surface Pressure"
+              value={
+                surfacePressure === undefined ? '—' : `${surfacePressure} hPa`
+              }
+            />
+            <AdditionalInfo
+              label="Pressure (MSL)"
+              value={pressureMsl === undefined ? '—' : `${pressureMsl} hPa`}
+            />
+            <AdditionalInfo
+              label="Dew Point"
+              value={dewPoint === undefined ? '—' : `${dewPoint}°C`}
+            />
+            <AdditionalInfo
+              label="Precipitation"
+              value={environment ? `${environment.precipitation} mm` : '—'}
+            />
+            <AdditionalInfo
+              label="Coordinates"
+              value={`${trigger.latitude.toFixed(
+                4,
+              )}, ${trigger.longitude.toFixed(4)}`}
+            />
+          </View>
+          {precipitationNextHour === 0 && showersNextHour === 0 && (
+            <View style={styles.noRainBanner}>
+              <MaterialCommunityIcons
+                name="check-circle"
+                size={18}
+                color="#37dfa0"
               />
-              <Metric
-                icon="weather-windy"
-                label="Wind (10m)"
-                value={environment ? `${environment.windSpeed} km/h` : '—'}
-              />
-              <Metric
-                icon="weather-rainy"
-                label="Rain"
-                value={environment ? `${environment.precipitation} mm` : '—'}
-              />
-              <Metric
-                icon="weather-cloudy"
-                label="Cloud cover"
-                value={environment ? `${environment.cloudCover}%` : '—'}
-              />
-              <Metric
-                icon="white-balance-sunny"
-                label="UV index"
-                value={
-                  environment?.uvIndex === null || !environment
-                    ? '—'
-                    : `${environment.uvIndex}`
-                }
-              />
-              <Metric
-                icon="eye-outline"
-                label="Visibility"
-                value={
-                  environment
-                    ? `${(environment.visibility / 1000).toFixed(1)} km`
-                    : '—'
-                }
-              />
+              <Text style={styles.noRainText}>
+                No precipitation within an hour
+              </Text>
             </View>
           )}
-        </LinearGradient>
+        </View>
 
         <View style={styles.airCard}>
           <Text style={styles.sectionTitle}>Air Quality Details</Text>
@@ -347,6 +447,15 @@ export default function TriggerDetailScreen({
           )}
         </View>
       </ScrollView>
+    </View>
+  );
+}
+
+function AdditionalInfo({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.additionalInfoRow}>
+      <Text style={styles.additionalInfoLabel}>{label}</Text>
+      <Text style={styles.additionalInfoValue}>{value}</Text>
     </View>
   );
 }
@@ -454,6 +563,34 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#ffffff30',
   },
+  additionalMetrics: { marginTop: 8 },
+  additionalInfoRow: {
+    minHeight: 41,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ffffff15',
+    gap: 12,
+  },
+  additionalInfoLabel: { color: '#bfc8d6', fontSize: 14, flexShrink: 1 },
+  additionalInfoValue: {
+    color: '#f4f6fb',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'right',
+    flexShrink: 1,
+  },
+  noRainBanner: {
+    marginTop: 16,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#164e4a',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  noRainText: { color: '#c4ffe7', fontSize: 13, fontWeight: '600' },
   sectionTitle: { color: '#edf2ff', fontSize: 19, fontWeight: '700' },
   airMetrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },
   suggestionCard: {

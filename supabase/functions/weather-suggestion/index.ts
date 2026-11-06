@@ -35,7 +35,12 @@ function isEnvironment(value: unknown): value is Record<string, number | null> {
     ) &&
     (readings.uvIndex === null ||
       (typeof readings.uvIndex === 'number' &&
-        Number.isFinite(readings.uvIndex)))
+        Number.isFinite(readings.uvIndex))) &&
+    ['precipitationNextHour', 'showersNextHour'].every(
+      key =>
+        readings[key] === null ||
+        (typeof readings[key] === 'number' && Number.isFinite(readings[key])),
+    )
   );
 }
 
@@ -103,7 +108,12 @@ Deno.serve(async (request: Request) => {
   }
 
   const environment = Object.fromEntries(
-    [...environmentKeys, 'uvIndex'].map(key => [key, input[key]]),
+    [
+      ...environmentKeys,
+      'uvIndex',
+      'precipitationNextHour',
+      'showersNextHour',
+    ].map(key => [key, input[key]]),
   );
 
   let groqResponse: Response;
@@ -118,7 +128,7 @@ Deno.serve(async (request: Request) => {
         },
         signal: AbortSignal.timeout(20_000),
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: 'llama-3.1-8b-instant',
           temperature: 0.4,
           max_tokens: 120,
           messages: [
@@ -140,7 +150,20 @@ Deno.serve(async (request: Request) => {
   }
 
   if (!groqResponse.ok) {
-    return respond(502, { error: 'The suggestion service returned an error.' });
+    let details = `Groq returned HTTP ${groqResponse.status}.`;
+    try {
+      const errorPayload = await groqResponse.json();
+      const providerMessage = errorPayload.error?.message;
+      if (typeof providerMessage === 'string') {
+        details = providerMessage.slice(0, 240);
+      }
+    } catch {
+      // Keep the HTTP status when the provider did not return JSON.
+    }
+    return respond(502, {
+      error: 'Groq could not generate a suggestion.',
+      details,
+    });
   }
 
   let suggestion: string | undefined;
