@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
+import { Text } from 'react-native';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import MapScreen from '../src/components/MapScreen';
@@ -17,14 +18,25 @@ jest.mock('react-native-maps', () => {
   return {
     __esModule: true,
     default: MockMapView,
-    Circle: ({ children }: { children?: React.ReactNode }) =>
+    Circle: ({
+      children,
+      radius,
+    }: {
+      children?: React.ReactNode;
+      radius: number;
+    }) =>
       ReactLib.createElement(
         ReactNative.View,
-        { testID: 'safe-zone-circle' },
+        { testID: radius === 200 ? 'red-zone-circle' : 'safe-zone-circle' },
         children,
       ),
-    Marker: ({ children }: { children?: React.ReactNode }) =>
-      ReactLib.createElement(ReactNative.View, null, children),
+    Marker: ({
+      children,
+      ...props
+    }: {
+      children?: React.ReactNode;
+      [key: string]: unknown;
+    }) => ReactLib.createElement(ReactNative.View, props, children),
     PROVIDER_GOOGLE: 'google',
   };
 });
@@ -38,9 +50,33 @@ jest.mock('expo-location', () => ({
   requestForegroundPermissionsAsync: jest
     .fn()
     .mockResolvedValue({ granted: true }),
+  reverseGeocodeAsync: jest
+    .fn()
+    .mockResolvedValue([
+      { city: 'Rajkot', region: 'Gujarat', country: 'India' },
+    ]),
+  watchPositionAsync: jest.fn().mockResolvedValue({ remove: jest.fn() }),
+}));
+
+jest.mock('expo-notifications', () => ({
+  AndroidImportance: { HIGH: 4 },
+  getPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
+  requestPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
+  scheduleNotificationAsync: jest.fn().mockResolvedValue('notification-id'),
+  setNotificationChannelAsync: jest.fn().mockResolvedValue(null),
+  setNotificationHandler: jest.fn(),
+}));
+
+jest.mock('expo-secure-store', () => ({
+  deleteItemAsync: jest.fn().mockResolvedValue(null),
+  getItemAsync: jest.fn().mockResolvedValue(null),
+  setItemAsync: jest.fn().mockResolvedValue(null),
 }));
 
 const triggerInsert = jest.fn();
+const triggerRange = jest.fn();
+const triggerFunction = jest.fn();
+let triggerRecords: Array<Record<string, unknown>> = [];
 
 const client = {
   from: jest.fn((table: string) => {
@@ -58,8 +94,27 @@ const client = {
       return query;
     }
 
-    return { insert: triggerInsert };
+    if (table === 'inhaler_triggers') {
+      const query = {
+        select: jest.fn(),
+        eq: jest.fn(),
+        order: jest.fn(),
+        range: triggerRange,
+        insert: triggerInsert,
+      };
+      query.select.mockReturnValue(query);
+      query.eq.mockReturnValue(query);
+      query.order.mockReturnValue(query);
+      return query;
+    }
+
+    return {
+      select: jest.fn().mockReturnThis(),
+      eq: jest.fn().mockReturnThis(),
+      maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
+    };
   }),
+  functions: { invoke: triggerFunction },
 } as unknown as SupabaseClient;
 
 const user = {
@@ -70,37 +125,19 @@ const user = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  triggerRecords = [];
+  triggerRange.mockImplementation(async () => ({
+    data: triggerRecords,
+    error: null,
+  }));
   triggerInsert.mockResolvedValue({ error: null });
+  triggerFunction.mockResolvedValue({
+    data: { suggestion: 'Check the AQI before spending time outdoors.' },
+    error: null,
+  });
 });
 
-test('records location and Open-Meteo conditions in Supabase', async () => {
-  const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-    {
-      ok: true,
-      json: async () => ({
-        current: {
-          temperature_2m: 32,
-          apparent_temperature: 35,
-          relative_humidity_2m: 48,
-          precipitation: 0,
-          weathercode: 1,
-          cloudcover: 10,
-          pressure_msl: 1008,
-          visibility: 10000,
-          wind_speed_10m: 8,
-        },
-        daily: { uv_index_max: [7.2] },
-      }),
-    } as Response,
-  ).mockResolvedValueOnce(
-    {
-      ok: true,
-      json: async () => ({
-        current: { pm10: 22, pm2_5: 11, us_aqi: 42 },
-      }),
-    } as Response,
-  );
-
+async function renderMap() {
   const holder: { current?: ReactTestRenderer.ReactTestRenderer } = {};
   await ReactTestRenderer.act(async () => {
     holder.current = ReactTestRenderer.create(
@@ -117,12 +154,58 @@ test('records location and Open-Meteo conditions in Supabase', async () => {
         />
       </SafeAreaProvider>,
     );
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
   });
 
-  const app = holder.current;
-  if (!app) {
+  if (!holder.current) {
     throw new Error('Map screen did not render.');
   }
+  return holder.current;
+}
+
+function openMeteoFetchMock() {
+  return jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        current: {
+          temperature_2m: 32,
+          apparent_temperature: 35,
+          relative_humidity_2m: 48,
+          precipitation: 0,
+          weathercode: 1,
+          cloudcover: 10,
+          pressure_msl: 1008,
+          visibility: 10000,
+          wind_speed_10m: 8,
+        },
+        daily: { uv_index_max: [7.2] },
+      }),
+    } as Response)
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        current: { pm10: 22, pm2_5: 11, us_aqi: 42 },
+      }),
+    } as Response);
+}
+
+function containsText(
+  app: ReactTestRenderer.ReactTestRenderer,
+  expected: string,
+) {
+  return app.root.findAllByType(Text).some(node => {
+    const children = node.props.children;
+    return Array.isArray(children)
+      ? children.join('') === expected
+      : children === expected;
+  });
+}
+
+test('records location and Open-Meteo conditions in Supabase', async () => {
+  const fetchMock = openMeteoFetchMock();
+  const app = await renderMap();
   expect(
     app.root.findByProps({
       accessibilityLabel: 'Bluetooth inhaler connection information',
@@ -170,4 +253,83 @@ test('records location and Open-Meteo conditions in Supabase', async () => {
   );
 
   fetchMock.mockRestore();
+});
+
+test('renders recorded marks and opens the weather detail view', async () => {
+  const trigger = {
+    id: 'trigger-1',
+    user_id: user.id,
+    latitude: 22.3,
+    longitude: 70.78,
+    aqi: 42,
+    category: 'Good',
+    pm25: 11,
+    pm10: 22,
+    temperature: 32,
+    humidity: 48,
+    notes: 'Recorded conditions',
+    timestamp: '2026-04-10T12:00:00.000Z',
+  };
+  triggerRecords = [trigger];
+  const fetchMock = openMeteoFetchMock();
+  const app = await renderMap();
+
+  expect(
+    app.root.findAllByProps({ testID: 'trigger-marker' }).length,
+  ).toBeGreaterThan(0);
+  await ReactTestRenderer.act(async () => {
+    app.root.findAllByProps({ testID: 'trigger-marker' })[0].props.onPress();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  });
+  expect(containsText(app, 'Location Weather')).toBe(true);
+
+  await ReactTestRenderer.act(async () => {
+    app.root
+      .findByProps({
+        accessibilityLabel: 'Get environmental care suggestion',
+      })
+      .props.onPress();
+  });
+  expect(triggerFunction).toHaveBeenCalledWith(
+    'weather-suggestion',
+    expect.objectContaining({
+      body: expect.objectContaining({
+        environment: expect.objectContaining({ aqi: 42, pm25: 11, pm10: 22 }),
+      }),
+    }),
+  );
+  expect(
+    containsText(app, 'Check the AQI before spending time outdoors.'),
+  ).toBe(true);
+  fetchMock.mockRestore();
+});
+
+test('shows and notifies when more than five triggers are within 200 meters', async () => {
+  triggerRecords = Array.from({ length: 6 }, (_, index) => ({
+    id: `trigger-${index}`,
+    user_id: user.id,
+    latitude: 22.3,
+    longitude: 70.78,
+    aqi: 42,
+    category: 'Good',
+    pm25: 11,
+    pm10: 22,
+    temperature: 32,
+    humidity: 48,
+    notes: null,
+    timestamp: '2026-04-10T12:00:00.000Z',
+  }));
+
+  const app = await renderMap();
+  expect(app.root.findByProps({ testID: 'red-zone-circle' })).toBeTruthy();
+  expect(containsText(app, 'RED ZONE · 6 triggers within 200 m')).toBe(true);
+  const notifications = jest.requireMock('expo-notifications') as {
+    scheduleNotificationAsync: jest.Mock;
+  };
+  expect(notifications.scheduleNotificationAsync).toHaveBeenCalledWith(
+    expect.objectContaining({
+      content: expect.objectContaining({ title: 'Red zone alert' }),
+      trigger: null,
+    }),
+  );
 });

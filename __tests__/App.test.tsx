@@ -7,6 +7,10 @@ import ReactTestRenderer from 'react-test-renderer';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import App from '../App';
 
+jest.mock('expo-notifications', () => ({
+  setNotificationHandler: jest.fn(),
+}));
+
 jest.mock('react-native-maps', () => {
   const ReactNative = require('react-native');
 

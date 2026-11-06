@@ -18,6 +18,7 @@ module.exports = ({ config }) => ({
     ...(app.plugins ?? []),
     'expo-font',
     'expo-asset',
+    'expo-notifications',
     [
       'expo-location',
       {

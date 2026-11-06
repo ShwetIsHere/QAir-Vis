@@ -13,6 +13,8 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import * as SecureStore from 'expo-secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, {
   Circle,
@@ -22,6 +24,18 @@ import MapView, {
   type Region,
 } from 'react-native-maps';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
+import { fetchEnvironment, getAqiCategory } from '../lib/environment';
+import type { Environment } from '../lib/environment';
+import TriggerDetailScreen from './TriggerDetailScreen';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 type MapScreenProps = {
   client: SupabaseClient;
@@ -34,45 +48,19 @@ type InhalerCount = {
   total_doses: number;
 };
 
-type WeatherResponse = {
-  current: {
-    temperature_2m: number;
-    apparent_temperature: number;
-    relative_humidity_2m: number;
-    precipitation: number;
-    weathercode: number;
-    cloudcover: number;
-    pressure_msl: number;
-    visibility: number;
-    wind_speed_10m: number;
-  };
-  daily: {
-    uv_index_max: number[];
-  };
-};
-
-type AirQualityResponse = {
-  current: {
-    pm10: number;
-    pm2_5: number;
-    us_aqi: number;
-  };
-};
-
-type Environment = {
-  temperature: number;
-  apparentTemperature: number;
-  humidity: number;
-  precipitation: number;
-  weatherCode: number;
-  cloudCover: number;
-  pressure: number;
-  visibility: number;
-  windSpeed: number;
-  uvIndex: number | null;
-  aqi: number;
-  pm25: number;
-  pm10: number;
+export type TriggerRecord = {
+  id: string;
+  user_id: string;
+  latitude: number;
+  longitude: number;
+  aqi: number | null;
+  category: string | null;
+  pm25: number | null;
+  pm10: number | null;
+  temperature: number | null;
+  humidity: number | null;
+  notes: string | null;
+  timestamp: string;
 };
 
 const defaultRegion: Region = {
@@ -82,83 +70,24 @@ const defaultRegion: Region = {
   longitudeDelta: 0.012,
 };
 
-function getAqiCategory(aqi: number) {
-  if (aqi <= 50) return 'Good';
-  if (aqi <= 100) return 'Moderate';
-  if (aqi <= 150) return 'Unhealthy for Sensitive Groups';
-  if (aqi <= 200) return 'Unhealthy';
-  if (aqi <= 300) return 'Very Unhealthy';
-  return 'Hazardous';
+function distanceMeters(
+  first: Pick<LatLng, 'latitude' | 'longitude'>,
+  second: Pick<LatLng, 'latitude' | 'longitude'>,
+) {
+  const radians = (degrees: number) => (degrees * Math.PI) / 180;
+  const latitudeDelta = radians(second.latitude - first.latitude);
+  const longitudeDelta = radians(second.longitude - first.longitude);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(radians(first.latitude)) *
+      Math.cos(radians(second.latitude)) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  return (
+    6_371_000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+  );
 }
 
-async function fetchEnvironment(
-  latitude: number,
-  longitude: number,
-): Promise<Environment> {
-  const coordinates = `latitude=${latitude}&longitude=${longitude}`;
-  const [weatherResponse, airResponse] = await Promise.all([
-    fetch(
-      `https://api.open-meteo.com/v1/forecast?${coordinates}&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weathercode,cloudcover,pressure_msl,visibility,wind_speed_10m&daily=uv_index_max&timezone=auto`,
-    ),
-    fetch(
-      `https://air-quality-api.open-meteo.com/v1/air-quality?${coordinates}&current=pm10,pm2_5,us_aqi&timezone=auto`,
-    ),
-  ]);
-
-  if (!weatherResponse.ok) {
-    throw new Error(`Weather service returned HTTP ${weatherResponse.status}.`);
-  }
-  if (!airResponse.ok) {
-    throw new Error(
-      `Air quality service returned HTTP ${airResponse.status}.`,
-    );
-  }
-
-  const [weather, air] = await Promise.all([
-    weatherResponse.json() as Promise<WeatherResponse>,
-    airResponse.json() as Promise<AirQualityResponse>,
-  ]);
-  const values = [
-    weather.current?.temperature_2m,
-    weather.current?.apparent_temperature,
-    weather.current?.relative_humidity_2m,
-    weather.current?.precipitation,
-    weather.current?.weathercode,
-    weather.current?.cloudcover,
-    weather.current?.pressure_msl,
-    weather.current?.visibility,
-    weather.current?.wind_speed_10m,
-    air.current?.us_aqi,
-    air.current?.pm2_5,
-    air.current?.pm10,
-  ];
-
-  if (values.some((value) => !Number.isFinite(value))) {
-    throw new Error('Environmental services returned incomplete measurements.');
-  }
-
-  return {
-    temperature: weather.current.temperature_2m,
-    apparentTemperature: weather.current.apparent_temperature,
-    humidity: weather.current.relative_humidity_2m,
-    precipitation: weather.current.precipitation,
-    weatherCode: weather.current.weathercode,
-    cloudCover: weather.current.cloudcover,
-    pressure: weather.current.pressure_msl,
-    visibility: weather.current.visibility,
-    windSpeed: weather.current.wind_speed_10m,
-    uvIndex: weather.daily?.uv_index_max?.[0] ?? null,
-    aqi: air.current.us_aqi,
-    pm25: air.current.pm2_5,
-    pm10: air.current.pm10,
-  };
-}
-
-export default function MapScreen({
-  client,
-  user,
-  onSignOut,
-}: MapScreenProps) {
+export default function MapScreen({ client, user, onSignOut }: MapScreenProps) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
   const [region, setRegion] = useState(defaultRegion);
@@ -168,6 +97,9 @@ export default function MapScreen({
   const [count, setCount] = useState<InhalerCount | null>(null);
   const [countError, setCountError] = useState('');
   const [countLoading, setCountLoading] = useState(true);
+  const [triggers, setTriggers] = useState<TriggerRecord[]>([]);
+  const [triggersLoading, setTriggersLoading] = useState(true);
+  const [triggersError, setTriggersError] = useState('');
   const [profileOpen, setProfileOpen] = useState(false);
   const [signOutError, setSignOutError] = useState('');
   const [recordingTrigger, setRecordingTrigger] = useState(false);
@@ -178,6 +110,51 @@ export default function MapScreen({
   const [environmentOpen, setEnvironmentOpen] = useState(false);
   const [safeZoneEnabled, setSafeZoneEnabled] = useState(false);
   const [sosBusy, setSosBusy] = useState(false);
+  const [selectedTrigger, setSelectedTrigger] = useState<TriggerRecord | null>(
+    null,
+  );
+  const [nearbyTriggerCount, setNearbyTriggerCount] = useState(0);
+  const [redZoneError, setRedZoneError] = useState('');
+  const redZoneActive = useRef(false);
+  const redZoneStateInitialized = useRef(false);
+  const notificationPermissionRequested = useRef(false);
+
+  const loadTriggers = useCallback(async () => {
+    setTriggersLoading(true);
+    setTriggersError('');
+    try {
+      const pageSize = 500;
+      const allTriggers: TriggerRecord[] = [];
+      for (let from = 0; ; from += pageSize) {
+        const { data, error } = await client
+          .from('inhaler_triggers')
+          .select(
+            'id, user_id, latitude, longitude, aqi, category, pm25, pm10, temperature, humidity, notes, timestamp',
+          )
+          .eq('user_id', user.id)
+          .order('timestamp', { ascending: false })
+          .range(from, from + pageSize - 1);
+        if (error) {
+          throw error;
+        }
+
+        const page = (data ?? []) as TriggerRecord[];
+        allTriggers.push(...page);
+        if (page.length < pageSize) {
+          break;
+        }
+      }
+      setTriggers(allTriggers);
+    } catch (error) {
+      setTriggersError(
+        error instanceof Error
+          ? error.message
+          : 'Could not load your recorded triggers.',
+      );
+    } finally {
+      setTriggersLoading(false);
+    }
+  }, [client, user.id]);
 
   const loadCount = useCallback(async () => {
     setCountLoading(true);
@@ -265,12 +242,105 @@ export default function MapScreen({
     [deviceCoordinate],
   );
 
+  const evaluateRedZone = useCallback(async () => {
+    if (!deviceCoordinate) {
+      return;
+    }
+
+    const nearbyCount = triggers.filter(
+      trigger => distanceMeters(deviceCoordinate, trigger) <= 200,
+    ).length;
+    setNearbyTriggerCount(nearbyCount);
+    const insideRedZone = nearbyCount > 5;
+    const notificationKey = `qair-red-zone:${user.id}`;
+
+    if (!insideRedZone) {
+      const shouldClearNotificationState =
+        redZoneActive.current || !redZoneStateInitialized.current;
+      redZoneActive.current = false;
+      redZoneStateInitialized.current = true;
+      notificationPermissionRequested.current = false;
+      setRedZoneError('');
+      if (shouldClearNotificationState) {
+        try {
+          await SecureStore.deleteItemAsync(notificationKey);
+        } catch (error) {
+          setRedZoneError(
+            error instanceof Error
+              ? `Could not update red-zone alert state: ${error.message}`
+              : 'Could not update red-zone alert state.',
+          );
+        }
+      }
+      return;
+    }
+
+    redZoneActive.current = true;
+    redZoneStateInitialized.current = true;
+    try {
+      if (await SecureStore.getItemAsync(notificationKey)) {
+        return;
+      }
+
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('health-alerts', {
+          name: 'Health alerts',
+          importance: Notifications.AndroidImportance.HIGH,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#ef4444',
+        });
+      }
+
+      let permission = await Notifications.getPermissionsAsync();
+      if (
+        permission.status !== 'granted' &&
+        !notificationPermissionRequested.current
+      ) {
+        notificationPermissionRequested.current = true;
+        permission = await Notifications.requestPermissionsAsync();
+      }
+      if (permission.status !== 'granted') {
+        setRedZoneError(
+          'Red zone detected. Enable notifications to receive health alerts.',
+        );
+        return;
+      }
+
+      notificationPermissionRequested.current = false;
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Red zone alert',
+          body: `${nearbyCount} recorded triggers are within 200 m. You are in a red zone.`,
+          sound: true,
+        },
+        trigger: null,
+      });
+      await SecureStore.setItemAsync(notificationKey, 'true');
+      setRedZoneError('');
+    } catch (error) {
+      setRedZoneError(
+        error instanceof Error
+          ? `Red zone detected, but notification failed: ${error.message}`
+          : 'Red zone detected, but notification failed.',
+      );
+    }
+  }, [deviceCoordinate, triggers, user.id]);
+
   useEffect(() => {
     loadCount();
   }, [loadCount]);
 
   useEffect(() => {
+    loadTriggers();
+  }, [loadTriggers]);
+
+  useEffect(() => {
+    evaluateRedZone();
+  }, [evaluateRedZone]);
+
+  useEffect(() => {
     let active = true;
+    let locationSubscription: Location.LocationSubscription | undefined;
 
     async function locateUser() {
       try {
@@ -303,6 +373,24 @@ export default function MapScreen({
         });
         setRegion(nextRegion);
         mapRef.current?.animateToRegion(nextRegion, 700);
+        locationSubscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            distanceInterval: 50,
+            timeInterval: 30_000,
+          },
+          nextPosition => {
+            if (active) {
+              setDeviceCoordinate({
+                latitude: nextPosition.coords.latitude,
+                longitude: nextPosition.coords.longitude,
+              });
+            }
+          },
+        );
+        if (!active) {
+          locationSubscription.remove();
+        }
       } catch {
         if (active) {
           setLocationMessage(
@@ -315,6 +403,7 @@ export default function MapScreen({
     locateUser();
     return () => {
       active = false;
+      locationSubscription?.remove();
     };
   }, []);
 
@@ -359,7 +448,9 @@ export default function MapScreen({
       await onSignOut();
     } catch (error) {
       setSignOutError(
-        error instanceof Error ? error.message : 'Could not sign out. Try again.',
+        error instanceof Error
+          ? error.message
+          : 'Could not sign out. Try again.',
       );
     }
   }, [onSignOut]);
@@ -375,12 +466,18 @@ export default function MapScreen({
   const callPhoneNumber = useCallback((phoneNumber: string) => {
     const dialable = phoneNumber.replace(/[^\d+*#,;]/g, '');
     if (!dialable) {
-      Alert.alert('Invalid phone number', 'The saved emergency number is invalid.');
+      Alert.alert(
+        'Invalid phone number',
+        'The saved emergency number is invalid.',
+      );
       return;
     }
 
     Linking.openURL(`tel:${dialable}`).catch(() => {
-      Alert.alert('Unable to call', 'Your device could not open the phone app.');
+      Alert.alert(
+        'Unable to call',
+        'Your device could not open the phone app.',
+      );
     });
   }, []);
 
@@ -514,8 +611,11 @@ export default function MapScreen({
       if (error) {
         throw error;
       }
+      await loadTriggers();
       setTriggerMessage(
-        `Trigger recorded · AQI ${Math.round(currentEnvironment.aqi)} · ${currentEnvironment.temperature}°C`,
+        `Trigger recorded · AQI ${Math.round(currentEnvironment.aqi)} · ${
+          currentEnvironment.temperature
+        }°C`,
       );
     } catch (error) {
       setTriggerMessage(
@@ -526,7 +626,17 @@ export default function MapScreen({
     } finally {
       setRecordingTrigger(false);
     }
-  }, [client, loadEnvironment, user.id]);
+  }, [client, loadEnvironment, loadTriggers, user.id]);
+
+  if (selectedTrigger) {
+    return (
+      <TriggerDetailScreen
+        client={client}
+        trigger={selectedTrigger}
+        onBack={() => setSelectedTrigger(null)}
+      />
+    );
+  }
 
   return (
     <View style={styles.screen}>
@@ -550,6 +660,15 @@ export default function MapScreen({
             strokeWidth={2}
           />
         )}
+        {nearbyTriggerCount > 5 && deviceCoordinate && (
+          <Circle
+            center={deviceCoordinate}
+            radius={200}
+            strokeColor="rgba(239, 68, 68, 0.95)"
+            fillColor="rgba(239, 68, 68, 0.25)"
+            strokeWidth={3}
+          />
+        )}
         {deviceCoordinate && (
           <Marker coordinate={deviceCoordinate}>
             <View style={styles.userMarker}>
@@ -561,6 +680,27 @@ export default function MapScreen({
             </View>
           </Marker>
         )}
+        {triggers.map(trigger => (
+          <Marker
+            key={trigger.id}
+            testID="trigger-marker"
+            coordinate={{
+              latitude: trigger.latitude,
+              longitude: trigger.longitude,
+            }}
+            onPress={() => setSelectedTrigger(trigger)}
+            tracksViewChanges={false}
+          >
+            <View
+              style={[
+                styles.triggerMarker,
+                (trigger.aqi ?? 0) > 100 && styles.triggerMarkerWarning,
+              ]}
+            >
+              <MaterialCommunityIcons name="lungs" color="#fff" size={17} />
+            </View>
+          </Marker>
+        ))}
       </MapView>
 
       <View
@@ -576,11 +716,7 @@ export default function MapScreen({
           onPress={showBluetoothInfo}
           style={styles.bluetoothButton}
         >
-        <MaterialCommunityIcons
-          name="bluetooth"
-          color="#eef2ff"
-          size={24}
-        />
+          <MaterialCommunityIcons name="bluetooth" color="#eef2ff" size={24} />
         </Pressable>
       </View>
 
@@ -594,15 +730,9 @@ export default function MapScreen({
           <ActivityIndicator color="#fff" size="small" />
         ) : (
           <>
-            <MaterialCommunityIcons
-              name="medical-bag"
-              color="#fff"
-              size={16}
-            />
+            <MaterialCommunityIcons name="medical-bag" color="#fff" size={16} />
             <Text style={styles.counterText}>
-              {count
-                ? `${count.remaining_doses}/${count.total_doses}`
-                : '—/—'}
+              {count ? `${count.remaining_doses}/${count.total_doses}` : '—/—'}
             </Text>
           </>
         )}
@@ -616,18 +746,66 @@ export default function MapScreen({
           </Pressable>
         </View>
       )}
+      {triggersError ? (
+        <View
+          style={[
+            styles.triggerCountBadge,
+            styles.triggerErrorBadge,
+            { top: insets.top + 112 },
+          ]}
+        >
+          <Text style={styles.redZoneText}>Couldn’t load map marks.</Text>
+          <Pressable onPress={loadTriggers}>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : triggersLoading ? (
+        <View style={[styles.triggerCountBadge, { top: insets.top + 112 }]}>
+          <ActivityIndicator color="#fff" size="small" />
+          <Text style={styles.redZoneText}>Loading map marks</Text>
+        </View>
+      ) : nearbyTriggerCount > 5 ? (
+        <View style={[styles.redZoneBanner, { top: insets.top + 112 }]}>
+          <MaterialCommunityIcons name="alert" color="#fff" size={18} />
+          <Text style={styles.redZoneText}>
+            RED ZONE · {nearbyTriggerCount} triggers within 200 m
+          </Text>
+        </View>
+      ) : (
+        <View style={[styles.triggerCountBadge, { top: insets.top + 112 }]}>
+          <MaterialCommunityIcons
+            name="map-marker-multiple"
+            color="#fff"
+            size={16}
+          />
+          <Text style={styles.redZoneText}>
+            {triggers.length} recorded trigger{triggers.length === 1 ? '' : 's'}
+          </Text>
+        </View>
+      )}
+      {!!redZoneError && (
+        <View
+          style={[
+            styles.triggerCountBadge,
+            styles.triggerNotificationErrorBadge,
+            { top: insets.top + 154 },
+          ]}
+        >
+          <Text style={styles.redZoneText}>{redZoneError}</Text>
+        </View>
+      )}
       {!!signOutError && (
-        <View style={styles.locationNotice}>
+        <View style={[styles.locationNotice, { top: insets.top + 154 }]}>
           <Text style={styles.locationNoticeText}>{signOutError}</Text>
         </View>
       )}
       {!!locationMessage && (
-        <View style={styles.locationNotice}>
+        <View style={[styles.locationNotice, { top: insets.top + 154 }]}>
           <Text style={styles.locationNoticeText}>{locationMessage}</Text>
         </View>
       )}
       {!!triggerMessage && (
-        <View style={styles.triggerNotice}>
+        <View style={[styles.triggerNotice, { top: insets.top + 154 }]}>
           <Text style={styles.locationNoticeText}>{triggerMessage}</Text>
         </View>
       )}
@@ -649,7 +827,10 @@ export default function MapScreen({
             </Pressable>
           </View>
           {environmentLoading ? (
-            <ActivityIndicator color="#43d0ae" style={styles.environmentLoader} />
+            <ActivityIndicator
+              color="#43d0ae"
+              style={styles.environmentLoader}
+            />
           ) : environmentError ? (
             <View>
               <Text style={styles.environmentError}>{environmentError}</Text>
@@ -659,11 +840,16 @@ export default function MapScreen({
             </View>
           ) : environment ? (
             <View style={styles.environmentMetrics}>
-              <Metric label="Temperature" value={`${environment.temperature}°C`} />
+              <Metric
+                label="Temperature"
+                value={`${environment.temperature}°C`}
+              />
               <Metric label="Humidity" value={`${environment.humidity}%`} />
               <Metric
                 label="US AQI"
-                value={`${Math.round(environment.aqi)} · ${getAqiCategory(environment.aqi)}`}
+                value={`${Math.round(environment.aqi)} · ${getAqiCategory(
+                  environment.aqi,
+                )}`}
                 highlight
               />
               <Metric label="PM2.5" value={`${environment.pm25} µg/m³`} />
@@ -709,7 +895,9 @@ export default function MapScreen({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={
-            safeZoneEnabled ? 'Hide 250 meter safe zone' : 'Show 250 meter safe zone'
+            safeZoneEnabled
+              ? 'Hide 250 meter safe zone'
+              : 'Show 250 meter safe zone'
           }
           onPress={() => setSafeZoneEnabled(!safeZoneEnabled)}
           style={[
@@ -731,11 +919,7 @@ export default function MapScreen({
             <ActivityIndicator color="#fff" size="small" />
           ) : (
             <>
-              <MaterialCommunityIcons
-                name="alert"
-                color="#fff"
-                size={20}
-              />
+              <MaterialCommunityIcons name="alert" color="#fff" size={20} />
               <Text style={styles.sosLabel}>SOS</Text>
             </>
           )}
@@ -803,9 +987,7 @@ export default function MapScreen({
       </View>
 
       {profileOpen && (
-        <View
-          style={[styles.profileCard, { bottom: insets.bottom + 78 }]}
-        >
+        <View style={[styles.profileCard, { bottom: insets.bottom + 78 }]}>
           <Text style={styles.profileTitle}>
             {user.user_metadata.full_name || 'Your Profile'}
           </Text>
@@ -1005,6 +1187,46 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
   environmentHighlight: { color: '#5ce0bd' },
+  triggerMarker: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#278c78',
+    borderWidth: 2,
+    borderColor: '#fff',
+    elevation: 4,
+  },
+  triggerMarkerWarning: { backgroundColor: '#d88724' },
+  triggerCountBadge: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    borderRadius: 18,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    backgroundColor: '#172239ed',
+  },
+  triggerErrorBadge: { backgroundColor: '#8f2f43' },
+  triggerNotificationErrorBadge: { backgroundColor: '#4b2632' },
+  redZoneBanner: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: '#c72f42',
+    borderWidth: 1,
+    borderColor: '#ffd0d5',
+    elevation: 6,
+  },
+  redZoneText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   userMarker: {
     width: 36,
     height: 36,
@@ -1058,8 +1280,17 @@ const styles = StyleSheet.create({
     borderColor: '#ffffff24',
   },
   profileTitle: { color: '#f1f5ff', fontSize: 18, fontWeight: '700' },
-  profileEmail: { color: '#acb7ca', fontSize: 14, marginTop: 5, marginBottom: 16 },
+  profileEmail: {
+    color: '#acb7ca',
+    fontSize: 14,
+    marginTop: 5,
+    marginBottom: 16,
+  },
   signOutGradient: { borderRadius: 22, overflow: 'hidden' },
-  signOutButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  signOutButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   signOutText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 });
