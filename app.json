@@ -11,6 +11,9 @@
     },
     "android": {
       "package": "com.qairvis.app"
-    }
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }
